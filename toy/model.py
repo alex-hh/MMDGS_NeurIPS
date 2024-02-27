@@ -58,6 +58,8 @@ class DenoiserLearnedVar(nn.Module):
 
 
 class DenoisingEBM(nn.Module):
+    """Energy paramaterisation."""
+
     def __init__(self, opt):
         super().__init__()
         self.x_dim=opt['x_dim']
@@ -66,8 +68,6 @@ class DenoisingEBM(nn.Module):
         self.net=FeedFowardNet(input_dim=self.x_dim, output_dim=self.x_dim,h_layer_num=opt['layer_num'],act=opt['act']).to(opt['device'])
         self.optimizer=optim.Adam(self.net.parameters(), lr=opt['lr'])
         self.iso_cov=None
-
-
 
     def forward(self, noisy_x):
         noisy_x=noisy_x.requires_grad_()
@@ -83,15 +83,28 @@ class DenoisingEBM(nn.Module):
         with torch.no_grad():
             self.iso_cov=self.noise_std**2-self.noise_std**4*((x_score_dataset**2).sum(1).mean()/2)
         return self.iso_cov
-        
 
     def logp_x_tx_isotropic_cov(self, x,noisy_x):
+        """Modified to work with batched inputs.
+
+        The problem originally was the use of diag to build a covariance matrix:
+            diag doesn't operate on batched tensors.
+        """
         noisy_x=noisy_x.to(self.device)
         x=x.to(self.device)
         if self.iso_cov is None:
             return "please estimate isotropic covariance first"
         x_mu=self.forward(noisy_x)
-        log_prob=MultivariateNormal(x_mu,torch.diag(torch.ones_like(x_mu)*self.iso_cov)).log_prob(x)
+
+        assert x_mu.ndim == 2
+        # Batched construction of diagonal covariance matrix
+        # (TODO: maybe theres a simpler route using Independent.)
+        batch_size, n = x_mu.shape
+        diagonal_matrices = torch.zeros(batch_size, n, n, device=x_mu.device, dtype=x_mu.dtype)
+        indices = torch.arange(n, device=x_mu.device)
+        diagonal_matrices[:, indices, indices] = self.iso_cov
+        # log_prob=MultivariateNormal(x_mu,torch.diag(torch.ones_like(x_mu)*self.iso_cov)).log_prob(x)
+        log_prob = MultivariateNormal(x_mu, diagonal_matrices).log_prob(x)
         return log_prob.detach()
     
     def sample_isotropic_cov(self, noisy_x):
@@ -107,14 +120,24 @@ class DenoisingEBM(nn.Module):
             return -score[0].sum(0)
         return  jacobian(lambda a:  get_score_sum(a), noisy_x, vectorize=True).swapaxes(0, 1)
 
-
     def logp_x_tx_full_cov(self, x,noisy_x):
+        """Modified to work with batched inputs.
+
+        The problem originally was the use of diag to build a covariance matrix.
+        """
         x=x.to(self.device)
-        noisy_x=noisy_x.view(1,2).to(self.device).requires_grad_()
+        assert noisy_x.ndim == 2
+        noisy_x=noisy_x.to(self.device).requires_grad_()
         x_mu=self.forward(noisy_x)
+
+        batch_size, n = x_mu.shape
+        diagonal_matrices = torch.zeros(batch_size, n, n, device=x_mu.device, dtype=x_mu.dtype)
+        indices = torch.arange(n, device=x_mu.device)
+        diagonal_matrices[:, indices, indices] = self.noise_std**2
+
         hessian_matrix = self.get_hessian(noisy_x)
         with torch.no_grad():
-            x_cov=self.noise_std**4*hessian_matrix+torch.diag(torch.ones(2).to(self.device))*(self.noise_std)**2
+            x_cov=self.noise_std**4*hessian_matrix+diagonal_matrices
             log_prob=MultivariateNormal(x_mu,x_cov).log_prob(x)
         return log_prob.detach()
     
@@ -127,5 +150,3 @@ class DenoisingEBM(nn.Module):
             if is_psd(x_cov[0])==False:
                 x_cov = x_cov.view(2,2) + torch.diag(torch.ones(2, device=self.device)) * 1e-2
             return MultivariateNormal(x_mu, x_cov).sample()
-
-
