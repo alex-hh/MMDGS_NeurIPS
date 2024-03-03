@@ -58,7 +58,10 @@ class DenoiserLearnedVar(nn.Module):
 
 
 class DenoisingEBM(nn.Module):
-    """Energy paramaterisation."""
+    """Energy paramaterisation.
+    
+    We choose to have output shape same as input shape - why not just a scalar?
+    """
 
     def __init__(self, opt):
         super().__init__()
@@ -75,7 +78,7 @@ class DenoisingEBM(nn.Module):
         x_score=-grad(energy,noisy_x,create_graph=True)[0]
         denoised_x_mean=noisy_x+self.noise_std**2*x_score
         return denoised_x_mean
-    
+
     def isotropic_cov_estimation(self, dataset):
         tx_dataset=(dataset+torch.randn_like(dataset)*self.noise_std).requires_grad_()
         energy_tx_dataset=self.net(tx_dataset.to(self.device)).sum()
@@ -84,14 +87,8 @@ class DenoisingEBM(nn.Module):
             self.iso_cov=self.noise_std**2-self.noise_std**4*((x_score_dataset**2).sum(1).mean()/2)
         return self.iso_cov
 
-    def logp_x_tx_isotropic_cov(self, x,noisy_x):
-        """Modified to work with batched inputs.
-
-        The problem originally was the use of diag to build a covariance matrix:
-            diag doesn't operate on batched tensors.
-        """
+    def dist_p_x_tx_isotropic_cov(self, noisy_x):
         noisy_x=noisy_x.to(self.device)
-        x=x.to(self.device)
         if self.iso_cov is None:
             return "please estimate isotropic covariance first"
         x_mu=self.forward(noisy_x)
@@ -104,15 +101,25 @@ class DenoisingEBM(nn.Module):
         indices = torch.arange(n, device=x_mu.device)
         diagonal_matrices[:, indices, indices] = self.iso_cov
         # log_prob=MultivariateNormal(x_mu,torch.diag(torch.ones_like(x_mu)*self.iso_cov)).log_prob(x)
-        log_prob = MultivariateNormal(x_mu, diagonal_matrices).log_prob(x)
-        return log_prob.detach()
-    
+        return MultivariateNormal(x_mu, diagonal_matrices)
+
+    def logp_x_tx_isotropic_cov(self, x,noisy_x):
+        """Modified to work with batched inputs.
+
+        The problem originally was the use of diag to build a covariance matrix:
+            diag doesn't operate on batched tensors.
+        """
+        x=x.to(self.device)
+        dist = self.dist_p_x_tx_isotropic_cov(noisy_x)
+        return dist.log_prob(x).detach()
+
+    # Prob doesn't work batched
     def sample_isotropic_cov(self, noisy_x):
         if self.iso_cov is None:
             return "please estimate isotropic covariance first"
         x_mu=self.forward(noisy_x)
         return MultivariateNormal(x_mu,torch.diag(torch.ones_like(x_mu[0])*self.iso_cov)).sample()
-       
+
     def get_hessian(self,noisy_x):
         def get_score_sum(noisy_x):
             energy=self.net(noisy_x).sum()
@@ -120,12 +127,7 @@ class DenoisingEBM(nn.Module):
             return -score[0].sum(0)
         return  jacobian(lambda a:  get_score_sum(a), noisy_x, vectorize=True).swapaxes(0, 1)
 
-    def logp_x_tx_full_cov(self, x,noisy_x):
-        """Modified to work with batched inputs.
-
-        The problem originally was the use of diag to build a covariance matrix.
-        """
-        x=x.to(self.device)
+    def dist_p_x_tx_full_cov(self, noisy_x):
         assert noisy_x.ndim == 2
         noisy_x=noisy_x.to(self.device).requires_grad_()
         x_mu=self.forward(noisy_x)
@@ -138,9 +140,18 @@ class DenoisingEBM(nn.Module):
         hessian_matrix = self.get_hessian(noisy_x)
         with torch.no_grad():
             x_cov=self.noise_std**4*hessian_matrix+diagonal_matrices
-            log_prob=MultivariateNormal(x_mu,x_cov).log_prob(x)
-        return log_prob.detach()
-    
+            return MultivariateNormal(x_mu,x_cov)
+
+    def logp_x_tx_full_cov(self, x,noisy_x):
+        """Modified to work with batched inputs.
+
+        The problem originally was the use of diag to build a covariance matrix.
+        """
+        x=x.to(self.device)
+        dist = self.dist_p_x_tx_full_cov(noisy_x)
+        return dist.log_prob(x).detach()
+
+    # Prob doesn't work batched
     def sample_full_cov(self, noisy_x):
         noisy_x=noisy_x.view(1,2).requires_grad_()
         x_mu=self.forward(noisy_x)
