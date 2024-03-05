@@ -59,7 +59,7 @@ class DenoiserLearnedVar(nn.Module):
 
 class DenoisingEBM(nn.Module):
     """Energy paramaterisation.
-    
+
     We choose to have output shape same as input shape - why not just a scalar?
     """
 
